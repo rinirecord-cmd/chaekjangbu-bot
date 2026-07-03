@@ -1,0 +1,16 @@
+{
+  "name": "chaekjangbu-bot",
+  "version": "1.0.0",
+  "description": "텔레그램으로 책 구매 정보를 받아 노션 책 장부에 자동 기록하는 봇",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "telegraf": "^4.16.3"
+  }
+}
