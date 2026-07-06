@@ -83,6 +83,7 @@ function parsePrice(raw) {
 }
 
 async function finalizeEntry(ctx, chatId, state) {
+  console.log(`[${new Date().toISOString()}] 저장 시도 chat_id=${chatId} fields=${JSON.stringify(state.fields)}`);
   const price = parsePrice(state.fields.price);
   if (price === null) {
     await ctx.reply('가격은 숫자로 다시 알려주세요. 예) 가격: 15000');
@@ -117,11 +118,12 @@ async function finalizeEntry(ctx, chatId, state) {
     });
 
     pending.delete(chatId);
+    console.log(`[${new Date().toISOString()}] 저장 성공 → ${page.url}`);
 
     const summary = FIELD_ORDER.map((key) => `${FIELD_DISPLAY[key]}: ${state.fields[key]}`).join('\n');
     await ctx.reply(`✅ 책 장부에 기록했어요!\n\n${summary}\n\n${page.url || ''}`);
   } catch (err) {
-    console.error('Notion 페이지 생성 실패:', err.body || err.message);
+    console.error(`[${new Date().toISOString()}] Notion 페이지 생성 실패:`, err.body || err.message);
     await ctx.reply(
       '노션에 저장하는 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나, 형식이 올바른지 확인해주세요.\n\n' +
         formatTemplate(state.fields)
@@ -166,6 +168,7 @@ bot.command('cancel', async (ctx) => {
 
 bot.on('photo', async (ctx) => {
   const chatId = ctx.chat.id;
+  console.log(`[${new Date().toISOString()}] 사진 수신 chat_id=${chatId} caption=${JSON.stringify(ctx.message.caption || '')}`);
   const state = getState(chatId);
 
   const photos = ctx.message.photo;
@@ -230,8 +233,10 @@ if (WEBHOOK_URL) {
   });
 } else {
   // 로컬 개발/테스트용: 폴링 모드.
-  bot.launch().then(() => {
-    console.log('책 장부 봇이 실행 중입니다 (polling 모드).');
+  // 주의: telegraf의 bot.launch()가 반환하는 Promise는 봇이 "멈출 때" resolve된다.
+  // 그래서 시작 알림은 onLaunch 콜백으로 찍는다.
+  bot.launch(() => {
+    console.log(`[${new Date().toISOString()}] 책 장부 봇이 실행 중입니다 (polling 모드).`);
   });
 
   process.once('SIGINT', () => bot.stop('SIGINT'));
