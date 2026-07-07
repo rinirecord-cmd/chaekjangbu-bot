@@ -17,6 +17,21 @@ const notion = new Client({ auth: NOTION_TOKEN });
 // 채팅방별로 "사진은 왔는데 정보는 덜 채워진" 상태를 잠깐 기억해두는 저장소
 const pending = new Map();
 
+// 진단용: 최근 이벤트를 메모리에 보관 (서버 로그 대신 /debug 로 확인)
+const recentLogs = [];
+function logEvent(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  recentLogs.push(line);
+  if (recentLogs.length > 60) recentLogs.shift();
+}
+
+// 들어오는 모든 업데이트를 가장 먼저 기록 (핸들러 도달 여부 확인용)
+bot.use((ctx, next) => {
+  logEvent(`업데이트 수신: type=${ctx.updateType}`);
+  return next();
+});
+
 const FIELD_LABELS = {
   title: ['제목', '책제목', '타이틀'],
   price: ['가격', '금액', '값'],
@@ -83,7 +98,7 @@ function parsePrice(raw) {
 }
 
 async function finalizeEntry(ctx, chatId, state) {
-  console.log(`[${new Date().toISOString()}] 저장 시도 chat_id=${chatId} fields=${JSON.stringify(state.fields)}`);
+  logEvent(`저장 시도 chat_id=${chatId} fields=${JSON.stringify(state.fields)}`);
   const price = parsePrice(state.fields.price);
   if (price === null) {
     await ctx.reply('가격은 숫자로 다시 알려주세요. 예) 가격: 15000');
@@ -93,8 +108,10 @@ async function finalizeEntry(ctx, chatId, state) {
   try {
     let coverUrl = null;
     if (state.photoFileId) {
+      logEvent('getFileLink 시도...');
       const link = await ctx.telegram.getFileLink(state.photoFileId);
       coverUrl = typeof link === 'string' ? link : link.href;
+      logEvent('getFileLink 성공 (URL 길이=' + String(coverUrl).length + ')');
     }
 
     const properties = {
@@ -118,12 +135,12 @@ async function finalizeEntry(ctx, chatId, state) {
     });
 
     pending.delete(chatId);
-    console.log(`[${new Date().toISOString()}] 저장 성공 → ${page.url}`);
+    logEvent('저장 성공 → ' + page.url);
 
     const summary = FIELD_ORDER.map((key) => `${FIELD_DISPLAY[key]}: ${state.fields[key]}`).join('\n');
     await ctx.reply(`✅ 책 장부에 기록했어요!\n\n${summary}\n\n${page.url || ''}`);
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] Notion 페이지 생성 실패:`, err.body || err.message);
+    logEvent('❌ 저장 실패: ' + (err.body ? JSON.stringify(err.body) : (err.message || String(err))));
     await ctx.reply(
       '노션에 저장하는 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나, 형식이 올바른지 확인해주세요.\n\n' +
         formatTemplate(state.fields)
@@ -168,7 +185,7 @@ bot.command('cancel', async (ctx) => {
 
 bot.on('photo', async (ctx) => {
   const chatId = ctx.chat.id;
-  console.log(`[${new Date().toISOString()}] 사진 수신 chat_id=${chatId} caption=${JSON.stringify(ctx.message.caption || '')}`);
+  logEvent(`사진 수신 chat_id=${chatId} caption=${JSON.stringify(ctx.message.caption || '')}`);
   const state = getState(chatId);
 
   const photos = ctx.message.photo;
@@ -210,8 +227,8 @@ bot.on('text', async (ctx) => {
   }
 });
 
-bot.catch((err) => {
-  console.error('봇 에러:', err);
+bot.catch((err, ctx) => {
+  logEvent('봇 처리 중 에러: ' + (err && (err.message || String(err))));
 });
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL; // 예: https://내앱.onrender.com
@@ -223,19 +240,33 @@ module.exports = { bot, parseFields, missingFields, FIELD_ORDER };
 if (require.main !== module) {
   // 다른 파일에서 require한 경우(테스트) — launch하지 않고 핸들러만 노출.
 } else if (WEBHOOK_URL) {
-  // 배포(클라우드) 환경: 텔레그램 공식 webhook 모드.
-  // bot.launch({webhook})가 (1) 봇 초기화(botInfo) (2) webhook 수신 서버 구동
-  // (3) setWebhook 등록을 한 번에 처리해준다. 손으로 express를 엮으면 초기화가 빠져
-  // 메시지가 핸들러로 전달되지 않는 문제가 있었다.
+  // 배포(클라우드) 환경: express + telegraf webhook.
+  // 핵심: botInfo를 명시적으로 초기화해야 메시지가 핸들러로 전달된다(이게 빠져서 안 됐음).
+  // 추가로 /debug 엔드포인트로 최근 처리 로그를 외부에서 확인할 수 있게 한다.
+  const express = require('express');
   const domain = WEBHOOK_URL.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-  bot.launch({
-    webhook: {
-      domain,
-      port: Number(PORT),
-      host: '0.0.0.0',
-    },
+  const app = express();
+  const DEBUG_KEY = TELEGRAM_TOKEN.slice(-8);
+
+  app.get('/', (_req, res) => res.send('책 장부 봇 살아있음'));
+  app.get('/debug', (req, res) => {
+    if (req.query.key !== DEBUG_KEY) return res.status(403).send('forbidden');
+    res.json({ botInfoLoaded: !!bot.botInfo, logs: recentLogs });
   });
-  console.log(`[${new Date().toISOString()}] 책 장부 봇 웹훅 모드 시작 (domain=${domain}, port=${PORT}).`);
+
+  (async () => {
+    try {
+      bot.botInfo = await bot.telegram.getMe(); // ★ 명시적 초기화
+      logEvent('botInfo 초기화 완료: @' + bot.botInfo.username);
+      app.use(await bot.createWebhook({ domain }));
+      app.listen(Number(PORT), '0.0.0.0', () => {
+        logEvent(`웹훅 모드 시작 (domain=${domain}, port=${PORT})`);
+      });
+    } catch (e) {
+      logEvent('❌ 시작 실패: ' + (e.message || String(e)));
+      console.error(e);
+    }
+  })();
 
   process.once('SIGINT', () => bot.stop('SIGINT'));
   process.once('SIGTERM', () => bot.stop('SIGTERM'));
