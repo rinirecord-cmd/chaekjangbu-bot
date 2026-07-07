@@ -217,20 +217,28 @@ bot.catch((err) => {
 const WEBHOOK_URL = process.env.WEBHOOK_URL; // 예: https://내앱.onrender.com
 const PORT = process.env.PORT || 3000;
 
-if (WEBHOOK_URL) {
-  // 배포 환경: 텔레그램이 메시지를 직접 이 서버로 찔러주는 방식.
-  // 무료 호스팅이 한동안 조용하면 잠들어도, 텔레그램의 요청 자체가 깨우는 신호가 된다.
-  const express = require('express');
-  const app = express();
-  const path = `/telegraf/${TELEGRAM_TOKEN}`;
+// 테스트에서 require할 수 있도록 export (직접 실행할 때만 launch)
+module.exports = { bot, parseFields, missingFields, FIELD_ORDER };
 
-  app.get('/', (_req, res) => res.send('책 장부 봇 살아있음'));
-  app.use(bot.webhookCallback(path));
-
-  app.listen(PORT, async () => {
-    await bot.telegram.setWebhook(`${WEBHOOK_URL}${path}`);
-    console.log(`책 장부 봇이 웹훅 모드로 ${PORT}번 포트에서 실행 중입니다.`);
+if (require.main !== module) {
+  // 다른 파일에서 require한 경우(테스트) — launch하지 않고 핸들러만 노출.
+} else if (WEBHOOK_URL) {
+  // 배포(클라우드) 환경: 텔레그램 공식 webhook 모드.
+  // bot.launch({webhook})가 (1) 봇 초기화(botInfo) (2) webhook 수신 서버 구동
+  // (3) setWebhook 등록을 한 번에 처리해준다. 손으로 express를 엮으면 초기화가 빠져
+  // 메시지가 핸들러로 전달되지 않는 문제가 있었다.
+  const domain = WEBHOOK_URL.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  bot.launch({
+    webhook: {
+      domain,
+      port: Number(PORT),
+      host: '0.0.0.0',
+    },
   });
+  console.log(`[${new Date().toISOString()}] 책 장부 봇 웹훅 모드 시작 (domain=${domain}, port=${PORT}).`);
+
+  process.once('SIGINT', () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
 } else {
   // 로컬 개발/테스트용: 폴링 모드.
   // 주의: telegraf의 bot.launch()가 반환하는 Promise는 봇이 "멈출 때" resolve된다.
